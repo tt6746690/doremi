@@ -66,7 +66,10 @@ from transformers.models.gpt2.configuration_gpt2 import GPT2Config
 from doremi.training_args import ModelArguments, DataTrainingArguments, FullTrainingArguments
 import doremi.dataloader as data_utils
 from doremi.trainer import DoReMiTrainer
-import doremi.models as doremi_models
+try:
+    import doremi.models as doremi_models
+except Exception:
+    pass
 try:
     from flash_attn.models.gpt_neox import gpt_neox_config_to_gpt2_config
 except Exception:

@@ -27,6 +27,8 @@ logger = get_logger(__name__)
 RANDOM_BATCH_SIZE = 8192
 DEFAULT_SEED=111
 
+# datasets v.2.10.1: https://github.com/huggingface/datasets/blob/2843fceabc428932754ba497f643d6e94173b91e/src/datasets/iterable_dataset.py
+# datasets main: https://github.com/huggingface/datasets/blob/f68139846c26b43631bd235114854f4bf6cb9954/src/datasets/iterable_dataset.py#L561
 class UpdatableRandomlyCyclingMultiSourcesExamplesIterable(
         RandomlyCyclingMultiSourcesExamplesIterable):
 
@@ -39,22 +41,32 @@ class UpdatableRandomlyCyclingMultiSourcesExamplesIterable(
         self.probabilities_file = probabilities_file
         self.probabilities = probabilities
 
+    # wpq: change `probabilities=None` to `p=None` for this version of `datasets`
     @staticmethod
-    def _iter_random_indices(rng, num_sources, probabilities_file=None, probabilities=None, random_batch_size=RANDOM_BATCH_SIZE):
+    def _iter_random_indices(rng, num_sources, probabilities_file=None, p=None, random_batch_size=RANDOM_BATCH_SIZE):
         while True:
             # read domain weights
             if probabilities_file is not None:
                 with open(probabilities_file, 'rb') as f:
-                    probabilities = pickle.load(f)
+                    p = pickle.load(f)
 
-            yield from (int(i) for i in rng.choice(num_sources, size=random_batch_size, p=probabilities))
+            yield from (int(i) for i in rng.choice(num_sources, size=random_batch_size, p=p))
 
     def _give_indice_iterator(self):
         rng = deepcopy(self.generator)
         return self._iter_random_indices(rng, len(self.ex_iterables), probabilities_file=self.probabilities_file, probabilities=self.probabilities)
 
-    def shard_data_sources(self, shard_indices):
+    # def shard_data_sources(self, shard_indices):
+    #     return self
+    def shard_data_sources(self, worker_id: int, num_workers: int):
+        """Either keep only the requested shard, or propagate the request to the underlying iterable."""
         return self
+        # return RandomlyCyclingMultiSourcesExamplesIterable(
+        #     [iterable.shard_data_sources(worker_id, num_workers) for iterable in self.ex_iterables],
+        #     self.generator,
+        #     self.probabilities,
+        #     self.stopping_strategy,
+        # )
 
     @property
     def n_shards(self):
@@ -168,6 +180,43 @@ def skippable_data_gen(shards, num_skip_examples=0, loop=True, seed=111, shuffle
             for ex in shard:
                 yield ex
             seed += 1
+
+
+# wpq: make normal `Dataset` infinite `IterableDataset`, so that we can sample 
+# repeated from datasets with small number of examples by repeating the dataset.
+# this function also handles shuffling, and capable of skipping examples.
+def skippable_data_gen_dataset(ds, num_skip_examples=0, loop=True, seed=111, shuffle=False):
+
+    def get_shard_ds(shard, num_skipped, seed, shuffle):
+        if shuffle:
+            shard = shard.shuffle(seed=seed)
+        if num_skipped < num_skip_examples:
+            # try to skip examples
+            if len(shard) < (num_skip_examples - num_skipped):
+                num_skipped += len(shard)
+            else:
+                shard = shard.select(range(num_skip_examples - num_skipped, len(shard)))
+                logger.info(f"Skipped {num_skip_examples} examples for {ds}")
+                num_skipped = num_skip_examples
+        return shard, num_skipped
+
+    num_skipped = 0
+    if loop:
+        while True:
+            ds, num_skipped = get_shard_ds(ds, num_skipped, seed, shuffle)
+            if num_skipped < num_skip_examples:
+                continue
+
+            for ex in ds:
+                yield ex
+            seed += 1
+    else:
+        ds, num_skipped = get_shard_ds(ds, num_skipped, seed, shuffle)
+
+        for ex in ds:
+            yield ex
+        seed += 1
+        
 
 
 def get_pile_datasets(
@@ -379,6 +428,12 @@ def get_preprocessed_mixed_dataset(
 
 
 def get_data_collator(tokenizer, return_tensors='pt', do_padding=False):
+    
+    # wpq: for padding batches with `labels`
+    if do_padding:
+        from transformers import DataCollatorForSeq2Seq
+        seq2seq_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer)
+
     def data_collator(features):
         if not do_padding:
             batch = {
@@ -386,7 +441,11 @@ def get_data_collator(tokenizer, return_tensors='pt', do_padding=False):
                     for k in features[0].keys()
                     }
         else:
-            batch = tokenizer.pad(features, return_tensors=return_tensors, pad_to_multiple_of=tokenizer.model_max_length)
+            ## wpq: for instruction tuning dataset, different dataset has different average 
+            # sequence length, instead of padding to model max length, pad to longest sequence in a batch.
+            # batch = tokenizer.pad(features, return_tensors=return_tensors, pad_to_multiple_of=tokenizer.model_max_length)
+            # batch = tokenizer.pad(features, return_tensors=return_tensors, padding=True)
+            batch = seq2seq_collator(features, return_tensors=return_tensors)
         batch['attention_mask'] = batch['attention_mask'].long()
         batch['input_ids'] = batch['input_ids'].long()
 

@@ -16,7 +16,7 @@ from itertools import chain
 
 PILE_DOMAINS = ['ArXiv', 'BookCorpus2', 'Books3', 'DM Mathematics', 'Enron Emails', 'EuroParl', 'FreeLaw', 'Github', 'Gutenberg (PG-19)', 'HackerNews', 'NIH ExPorter', 'OpenSubtitles', 'OpenWebText2', 'PhilPapers', 'Pile-CC', 'PubMed Abstracts', 'PubMed Central', 'StackExchange', 'USPTO Backgrounds', 'Ubuntu IRC', 'Wikipedia (en)', 'YoutubeSubtitles']
 
-DOMAIN_TO_IDX = {
+TDOMAIN_O_IDX = {
     name: idx for idx, name in enumerate(PILE_DOMAINS)}
 
 PILE_SUBSETS = [f'0{i}' if i < 10 else str(i) for i in range(0, 30)]
@@ -99,6 +99,7 @@ def main():
 
     ds = ds.filter(filter_fn, with_indices=True)
     ds = ds.map(transform, batched=True, remove_columns=['text', 'meta'])
+    # `ds` contains {'input_ids', 'attention_mask'}!
 
     # create a generator
     def data_generator():
