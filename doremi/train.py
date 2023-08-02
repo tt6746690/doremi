@@ -203,13 +203,20 @@ def main():
             config.update_from_string(model_args.config_overrides)
             logger.info(f"New config: {config}")
 
+
+    # wpq: `max_model_length` not specified correctly when loading pre-downloaded models from disk.
+    # here specify `max_model_length` so that data collator can function properly.
+    if model_args.model_type == 'gpt2':
+        model_max_length = 1024
+    else:
+        model_max_length = None
     tokenizer_kwargs = {
         "cache_dir": model_args.cache_dir,
         "use_fast": model_args.use_fast_tokenizer,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
+        "model_max_length": model_max_length,
     }
-
     if model_args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
         
@@ -347,6 +354,8 @@ def main():
     else:
         reference_model = None
 
+    # wpq: `use_cache=True` is incompatible with gradient checkpointing
+    model.config.use_cache=False
 
     # turn off find unused parameters
     training_args.ddp_find_unused_parameters = False
