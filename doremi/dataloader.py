@@ -182,6 +182,7 @@ def skippable_data_gen(shards, num_skip_examples=0, loop=True, seed=111, shuffle
             seed += 1
 
 
+
 # wpq: make normal `Dataset` infinite `IterableDataset`, so that we can sample 
 # repeated from datasets with small number of examples by repeating the dataset.
 # this function also handles shuffling, and capable of skipping examples.
@@ -205,6 +206,7 @@ def skippable_data_gen_dataset(ds, num_skip_examples=0, loop=True, seed=111, shu
         while True:
             ds, num_skipped = get_shard_ds(ds, num_skipped, seed, shuffle)
             if num_skipped < num_skip_examples:
+                seed += 1
                 continue
 
             for ex in ds:
@@ -212,12 +214,13 @@ def skippable_data_gen_dataset(ds, num_skip_examples=0, loop=True, seed=111, shu
             seed += 1
     else:
         ds, num_skipped = get_shard_ds(ds, num_skipped, seed, shuffle)
+        if num_skipped < num_skip_examples:
+            logger.info(f'Need to skip {num_skip_examples} but can skip {num_skipped}')
+            raise
 
         for ex in ds:
             yield ex
         seed += 1
-        
-
 
 def get_pile_datasets(
         preprocessed_dir,
@@ -320,8 +323,11 @@ def get_perdomain_datasets(
                     num_proc=8,
                     batched=False,
                 )
-                lm_datasets.set_format(type="pt")
+
             ds = lm_datasets['train']
+            ds = ds.remove_columns(['messages', 'id', 'dataset'])
+            ds.set_format(type="pt")
+            logger.info(f"Loaded {domain_dir}. Length: {len(ds)}")
             ds = IterableDataset.from_generator(
                     skippable_data_gen_dataset,
                     gen_kwargs={'ds': ds,
@@ -484,7 +490,11 @@ def get_data_collator(tokenizer, return_tensors='pt', do_padding=False):
     # wpq: for padding batches with `labels`
     if do_padding:
         from transformers import DataCollatorForSeq2Seq
-        seq2seq_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer)
+        seq2seq_collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer, 
+            # pad to the same length, to avoid error in concatenating batches (from each processes)
+            # of different sequence length when loading data.
+            pad_to_multiple_of=tokenizer.model_max_length)
 
     def data_collator(features):
         if not do_padding:

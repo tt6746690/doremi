@@ -228,7 +228,17 @@ def main():
             else getattr(torch, model_args.torch_dtype)
         )
         if model_args.model_type in {'gpt_flash', 'gpt_neox_flash'}:
-            model = doremi_models.GPTFlashAttnLMHeadModel.from_pretrained(model_args.model_name_or_path, config=config)
+            model = doremi_models.GPTFlashAttnLMHeadModel.from_pretrained(
+                model_args.model_name_or_path, config=config)
+        elif model_args.model_type in ['gpt2']:
+            model = doremi_models.GPT2LMHeadModelDoReMi.from_pretrained(
+                model_args.model_name_or_path, 
+                config=config,
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                use_auth_token=True if model_args.use_auth_token else None,
+                torch_dtype=torch_dtype,
+            )
         else:
             model = AutoModelForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
@@ -242,6 +252,8 @@ def main():
     else:
         if model_args.model_type in {'gpt_flash', 'gpt_neox_flash'}:
             model = doremi_models.GPTFlashAttnLMHeadModel(config)
+        elif model_args.model_type in {'gpt2'}:
+            model = doremi_models.GPT2LMHeadModelDoReMi(config)
         else:
             model = AutoModelForCausalLM.from_config(config)
 
@@ -272,7 +284,9 @@ def main():
                 tokenizer=tokenizer,
                 shuffle=data_args.shuffle,
                 num_skip_examples=num_skip_examples,
-                shard_reversal=training_args.reweight_domains)
+                shard_reversal=training_args.reweight_domains,
+                training_args=training_args,
+        )
 
     if training_args.do_eval:
         eval_dataset = data_utils.get_preprocessed_mixed_dataset(
@@ -284,7 +298,9 @@ def main():
                 add_domain_id=data_args.add_domain_id,
                 max_samples=data_args.max_eval_samples,
                 tokenizer=tokenizer,
-                no_interleave=True)
+                no_interleave=True,
+                training_args=training_args,
+        )
 
     if training_args.reweight_domains:
         torch_dtype = (
@@ -297,9 +313,18 @@ def main():
             reference_model = model_cls.from_pretrained(
                 training_args.reference_model_name_or_path,
                 config=config)
+        elif model_args.model_type in {'gpt2'}:
+            model_cls = doremi_models.GPT2LMHeadModelDoReMi
+            reference_model = model_cls.from_pretrained(
+                training_args.reference_model_name_or_path,
+                config=config,
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                use_auth_token=True if model_args.use_auth_token else None,
+                torch_dtype=torch_dtype,
+            )
         else:
             model_cls = AutoModelForCausalLM
-            
             reference_model = model_cls.from_pretrained(
                 training_args.reference_model_name_or_path,
                 from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -321,6 +346,7 @@ def main():
 
     else:
         reference_model = None
+
 
     # turn off find unused parameters
     training_args.ddp_find_unused_parameters = False
