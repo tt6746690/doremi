@@ -27,7 +27,13 @@ class CausalLMOutputWithDomainIDs(CausalLMOutputWithCrossAttentions):
     pertoken_loss: Optional[torch.FloatTensor] = None  # corresponds to uniq_domain_ids
     token_mask: Optional[torch.BoolTensor] = None  # 1 for tokens that are not padding
 
-
+## wpq: GPT2LMHeadModel
+# transformers v4.27.2 
+# https://github.com/huggingface/transformers/blob/v4.27.2/src/transformers/models/gpt2/modeling_gpt2.py#L955
+#
+# flash-attention
+# https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/models/gpt.py#L416
+#
 class GPTFlashAttnLMHeadModel(GPTLMHeadModelFlash):
 
     def __init__(self, config, process_group=None, device=None, dtype=None):
