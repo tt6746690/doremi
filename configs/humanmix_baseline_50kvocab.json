@@ -1,1 +1,1 @@
-{"train_domain_weights": {"cot": 0.25, "flan_v2": 0.25, "dolly": 0.25, "oasst1": 0.25}, "eval_domain_weights": {"cot": 0.25, "flan_v2": 0.25, "dolly": 0.25, "oasst1": 0.25}}
+{"train_domain_weights": {"cot": 0.5, "flan_v2": 0.25, "dolly": 0.12, "oasst1": 0.13}, "eval_domain_weights": {"cot": 0.5, "flan_v2": 0.25, "dolly": 0.12, "oasst1": 0.13}}

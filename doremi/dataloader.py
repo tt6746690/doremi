@@ -266,7 +266,10 @@ def get_perdomain_datasets(
         domain_names=None,
         num_skip_examples=0,
         shuffle=False,
-        shard_reversal=False):
+        shard_reversal=False,
+        tokenizer=None,
+        training_args=None,
+    ):
     '''
     Returns a dictionary from domain name to IterableDataset.
     '''
@@ -284,7 +287,51 @@ def get_perdomain_datasets(
     for domain in domains:
         domain_dir = preprocessed_dir / domain
 
-        if (domain_dir / 'dataset_info.json').exists():
+        ## wpq: read instruction tuning dataset off `jsonl` files
+        if (domain_dir / f'{domain}_data.jsonl').exists():
+            from open_instruct.finetune_trainer import encode_with_prompt_completion_format, encode_with_messages_format
+            from doremi.dataloader import skippable_data_gen_dataset
+
+            data_files = {'train': str(domain_dir / f'{domain}_data.jsonl')}
+            raw_datasets = load_dataset(
+                "json",
+                data_files=data_files,
+                cache_dir=cache_dir,
+            )
+            # Preprocessing the datasets.
+            if "prompt" in raw_datasets["train"].column_names and "completion" in raw_datasets["train"].column_names:
+                encode_function = partial(
+                    encode_with_prompt_completion_format,
+                    tokenizer=tokenizer,
+                    max_seq_length=1024,
+                )
+            elif "messages" in raw_datasets["train"].column_names:
+                encode_function = partial(
+                    encode_with_messages_format,
+                    tokenizer=tokenizer,
+                    max_seq_length=1024,
+                )
+            else:
+                raise ValueError("You need to have either 'prompt'&'completion' or 'messages' in your column names.")
+
+            with training_args.main_process_first(local=False, desc="Processing instruction data"):
+                lm_datasets = raw_datasets.map(
+                    encode_function,
+                    num_proc=8,
+                    batched=False,
+                )
+                lm_datasets.set_format(type="pt")
+            ds = lm_datasets['train']
+            ds = IterableDataset.from_generator(
+                    skippable_data_gen_dataset,
+                    gen_kwargs={'ds': ds,
+                                'num_skip_examples': domain_name_to_skip_num[domain],
+                                'loop': (split == 'train'),
+                                'seed': seed,
+                                'shuffle': shuffle}
+                    )
+            seed += 1
+        elif (domain_dir / 'dataset_info.json').exists():
             ds = load_from_disk(dataset_path=str(domain_dir))
             logger.info(f"Loaded {domain_dir}. Length: {len(ds)}")
         else:
@@ -320,7 +367,9 @@ def get_preprocessed_mixed_dataset(
         no_interleave=False,
         shuffle=False,
         num_skip_examples=0,
-        shard_reversal=False):
+        shard_reversal=False,
+        training_args=None,
+    ):
     '''preprocessed_dir: has the following format
                first level: domain directories
                second level: shards for each domain. number of shards per domain should be the same.
@@ -378,7 +427,10 @@ def get_preprocessed_mixed_dataset(
                 domain_names=domain_names,
                 num_skip_examples=num_skip_examples,
                 shuffle=shuffle,
-                shard_reversal=shard_reversal)
+                shard_reversal=shard_reversal,
+                tokenizer=tokenizer,
+                training_args=training_args,
+            )
         except Exception:
             raise ValueError(f"dataset_name {dataset_name} not implemented.")
 

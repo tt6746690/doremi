@@ -202,6 +202,7 @@ class DoReMiTrainer(Trainer):
         return self.lr_scheduler
 
 
+    # transformers v4.31.0: https://github.com/huggingface/transformers/blob/v4.31.0/src/transformers/trainer.py#L2669
     def compute_loss(self, model, inputs, return_outputs=False, return_pertoken_losses=False):
         """
         How the loss is computed by Trainer. By default, all models return the loss in the first element.
@@ -223,6 +224,9 @@ class DoReMiTrainer(Trainer):
             self._past = outputs[self.args.past_index]
 
         if labels is not None:
+            # wpq: add missing imports
+            from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+            from transformers.modeling_utils import unwrap_model
             if unwrap_model(model)._get_name() in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.values():
                 loss = self.label_smoother(outputs, labels, shift_labels=True)
             else:
@@ -236,6 +240,9 @@ class DoReMiTrainer(Trainer):
             # We don't use .loss here since the model may return tuples instead of ModelOutput.
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 
+        # doremi: modify from
+        # return (loss, outputs) if return_outputs else loss
+        #
         if return_outputs:
             return (loss, outputs)
         elif return_pertoken_losses:
@@ -279,6 +286,10 @@ class DoReMiTrainer(Trainer):
         wandb_log_dict[f'max_domain_id'] = domain_ids.max().item()
         wandb.log(wandb_log_dict, commit=False)
 
+    # wpq:
+    # transformers v4.27.2: https://github.com/huggingface/transformers/blob/68287689f2f0d8b7063c400230b3766987abf18d/src/transformers/trainer.py#L2619
+    # transformers v4.31.0: https://github.com/huggingface/transformers/blob/v4.31.0/src/transformers/trainer.py#L2628
+    # transformers v4.32.0.dev0 https://github.com/huggingface/transformers/blob/b257c46a075419c09e5ce5c5aa39bc346ecdb9a5/src/transformers/trainer.py#L2622
     def training_step(self, model, inputs):
         """
         Perform a training step on a batch of inputs.
@@ -369,28 +380,41 @@ class DoReMiTrainer(Trainer):
             else:
                 raise ValueError(f"doremi_optimizer {self.args.doremi_optimizer} is not supported")
         else:
+            # wpq: this is the original code.
             with self.compute_loss_context_manager():
                 loss = self.compute_loss(model, inputs)
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
-        if self.args.gradient_accumulation_steps > 1 and not self.deepspeed:
-            # deepspeed handles loss scaling by gradient_accumulation_steps in its `backward`
-            loss = loss / self.args.gradient_accumulation_steps
-
         if self.do_grad_scaling:
             self.scaler.scale(loss).backward()
         elif self.use_apex:
             with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                 scaled_loss.backward()
-        elif self.deepspeed:
-            # loss gets scaled under gradient_accumulation_steps in deepspeed
-            loss = self.deepspeed.backward(loss)
         else:
-            loss.backward()
+            self.accelerator.backward(loss)
 
-        return loss.detach()
+        return loss.detach() / self.args.gradient_accumulation_steps
+    
+        ## wpq: update code from transformers v4.27.2 -> v4.32.0.dev0
+        # if self.args.gradient_accumulation_steps > 1 and not self.deepspeed:
+        #     # deepspeed handles loss scaling by gradient_accumulation_steps in its `backward`
+        #     loss = loss / self.args.gradient_accumulation_steps
+
+        # if self.do_grad_scaling:
+        #     self.scaler.scale(loss).backward()
+        # elif self.use_apex:
+        #     with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+        #         scaled_loss.backward()
+        # elif self.deepspeed:
+        #     # loss gets scaled under gradient_accumulation_steps in deepspeed
+        #     loss = self.deepspeed.backward(loss)
+        # else:
+        #     loss.backward()
+
+        # return loss.detach()
+        ##
 
     def load_checkpoint(self, resume_from_checkpoint=None):
         # Model re-init

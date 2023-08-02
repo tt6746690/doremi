@@ -87,7 +87,7 @@ class DataTrainingArguments:
         default='.', metadata={"help": "Path to the dataset directory."}
     )
     dataset_name: str = field(
-        default='pile', metadata={"help": "Name of the dataset."}
+        default='', metadata={"help": "Name of the dataset."}
     )
     max_train_samples: Optional[int] = field(
         default=None,

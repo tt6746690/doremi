@@ -16,7 +16,7 @@ from itertools import chain
 
 PILE_DOMAINS = ['ArXiv', 'BookCorpus2', 'Books3', 'DM Mathematics', 'Enron Emails', 'EuroParl', 'FreeLaw', 'Github', 'Gutenberg (PG-19)', 'HackerNews', 'NIH ExPorter', 'OpenSubtitles', 'OpenWebText2', 'PhilPapers', 'Pile-CC', 'PubMed Abstracts', 'PubMed Central', 'StackExchange', 'USPTO Backgrounds', 'Ubuntu IRC', 'Wikipedia (en)', 'YoutubeSubtitles']
 
-TDOMAIN_O_IDX = {
+DOMAIN_TO_IDX = {
     name: idx for idx, name in enumerate(PILE_DOMAINS)}
 
 PILE_SUBSETS = [f'0{i}' if i < 10 else str(i) for i in range(0, 30)]
