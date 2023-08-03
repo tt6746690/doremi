@@ -366,8 +366,10 @@ class DoReMiTrainer(Trainer):
                 # if doing non-uniform sampling, normalize by inverse sampling weight
                 train_domain_weights = train_domain_weights / self.sampling_weights.to(train_domain_weights.device)
                 train_domain_weights = train_domain_weights / train_domain_weights.sum()
+                
                 curr_domain_weights = train_domain_weights[inputs['domain_ids']].unsqueeze(-1).expand_as(pertoken_loss).detach()
                 curr_domain_weights = curr_domain_weights * token_mask
+
                 normalizer = curr_domain_weights.sum()
                 # gather normalizer across GPUs
                 dist.all_reduce(normalizer, op=torch.distributed.ReduceOp.SUM) 
