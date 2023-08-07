@@ -1,1 +1,0 @@
-{"train_domain_weights": {"cot": 0.70685306, "flan_v2": 0.70685306, "dolly": 0.01061057, "oasst1": 0.02459495}, "eval_domain_weights": {"cot": 0.70685306, "flan_v2": 0.70685306, "dolly": 0.01061057, "oasst1": 0.02459495}}

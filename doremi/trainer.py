@@ -259,7 +259,7 @@ class DoReMiTrainer(Trainer):
         scores = scores.detach()
         domain_ids = domain_ids.detach()
 
-        if self.args.doremi_optimizer == 'doremiv1':
+        if self.args.doremi_optimizer.startswith('doremi'):
             perdomain_scores = []
             for domain_id in range(len(train_domain_weights)):
                 domain_mask = (domain_ids == domain_id)
@@ -269,22 +269,41 @@ class DoReMiTrainer(Trainer):
                 else:
                     curr_domain_scores = self.model.perdomain_scores[domain_id]
                 perdomain_scores.append(curr_domain_scores)
+
+            # `perdomain_scores` with size (#domains,) is the `λₜ` in the paper, 
+            #     e.g., the gradient of loss w.r.t. αₜ dL/dαₜ
             self.model.perdomain_scores[:] = torch.tensor(perdomain_scores)
-            log_new_train_domain_weights = torch.log(train_domain_weights) + self.args.reweight_eta * self.model.perdomain_scores
-            new_train_domain_weights = nn.functional.softmax(log_new_train_domain_weights, dim=0)
+
+            # `train_domain_weights` is αₜ; `log_new_train_domain_weights` is log(a_t')
+            # following implements: α_t' = α_{t-1} exp(η·λ_t), e.g., log(a_t') = log(α_{t-1}) + η·λ_t
+            log_new_train_domain_weights = torch.log(train_domain_weights+1e-30) + self.args.reweight_eta * self.model.perdomain_scores
+
+            # following implements: 
+            # softmax(log(α_t')) = (exp(log(a_t'[1])) / Σᵢ exp(log(a_t'[i])), ...)
+            #                    = (a_t'[1]/Σᵢ a_t'[i], ...)
+            new_train_domain_weights = nn.functional.softmax(log_new_train_domain_weights, dim=-1)
+
+            # following implements:
+            # αₜ = (1-c)·softmax(log(α_t')) + c·u where c=1e-4 by default, and u=1/#domains.
             train_domain_weights = (1-self.args.reweight_eps) * new_train_domain_weights + self.args.reweight_eps / len(new_train_domain_weights)
+
+            # wpq: clip the weights to [ϵ, 1-ϵ] just to make sure.
+            eps = 1e-8
+            train_domain_weights = torch.clip(train_domain_weights, min=eps, max=1-eps)
+
             self.write_weights(train_domain_weights)
         else:
             raise ValueError(f"DoReMi optimizer {self.args.doremi_optimizer} not supported")
 
-        wandb_log_dict = {}
-        for domain_idx in range(len(new_train_domain_weights)):
-            domain_name = self.domain_list[domain_idx]
-            wandb_log_dict[f'avg_domain_weights/{domain_name}'] = self.model.avg_domain_weights[domain_idx].item()
-            wandb_log_dict[f'train_domain_weights/{domain_name}'] = self.model.train_domain_weights[domain_idx].item()
-            wandb_log_dict[f'perdomain_scores/{domain_name}'] = self.model.perdomain_scores[domain_idx].item()
-        wandb_log_dict[f'max_domain_id'] = domain_ids.max().item()
-        wandb.log(wandb_log_dict, commit=False)
+        if self.is_local_process_zero():
+            wandb_log_dict = {}
+            for domain_idx in range(len(new_train_domain_weights)):
+                domain_name = self.domain_list[domain_idx]
+                wandb_log_dict[f'avg_domain_weights/{domain_name}'] = self.model.avg_domain_weights[domain_idx].item()
+                wandb_log_dict[f'train_domain_weights/{domain_name}'] = self.model.train_domain_weights[domain_idx].item()
+                wandb_log_dict[f'perdomain_scores/{domain_name}'] = self.model.perdomain_scores[domain_idx].item()
+            wandb_log_dict[f'max_domain_id'] = domain_ids.max().item()
+            wandb.log(wandb_log_dict, commit=False)
 
     # wpq:
     # transformers v4.27.2: https://github.com/huggingface/transformers/blob/68287689f2f0d8b7063c400230b3766987abf18d/src/transformers/trainer.py#L2619
@@ -320,29 +339,104 @@ class DoReMiTrainer(Trainer):
                 loss, pertoken_loss, reference_pertoken_loss, token_mask = self.compute_loss(model, inputs, return_pertoken_losses=True)
                 excess_loss = pertoken_loss - reference_pertoken_loss
 
-            if self.is_local_process_zero():
+            ## https://github.com/huggingface/transformers/blob/v4.31.0/src/transformers/training_args.py#L1840
+            if self.args.world_size > 1:  # DDP code.
+                if self.is_local_process_zero():
+                    with torch.no_grad():
+                        gathered_excess_losses = [
+                                torch.zeros_like(excess_loss) for _ in range(self.args.world_size)
+                                ]
+                        dist.gather(excess_loss, gathered_excess_losses, dst=0)
+                        gathered_excess_losses = torch.cat(gathered_excess_losses, dim=0)
+
+                        gathered_token_mask = [
+                                torch.zeros_like(token_mask) for _ in range(self.args.world_size)
+                                ] 
+                        dist.gather(token_mask, gathered_token_mask, dst=0)
+                        gathered_token_mask = torch.cat(gathered_token_mask, dim=0)
+
+                        gathered_domain_id = [
+                                torch.zeros_like(inputs['domain_ids']) for _ in range(self.args.world_size)
+                                ]
+                        dist.gather(inputs['domain_ids'], gathered_domain_id, dst=0)
+                        gathered_domain_id = torch.cat(gathered_domain_id, dim=0)
+
+                        self.pertoken_scores.append(gathered_excess_losses.detach())
+                        self.token_masks.append(gathered_token_mask.detach())
+                        self.domain_ids.append(gathered_domain_id.detach())
+
+                        if len(self.pertoken_scores) == self.args.gradient_accumulation_steps:
+                            pertoken_scores = torch.cat(self.pertoken_scores, dim=0)
+                            token_masks = torch.cat(self.token_masks, dim=0).bool()
+                            domain_ids = torch.cat(self.domain_ids, dim=0)
+
+                            # update domain weights
+                            self.update_domain_weights(pertoken_scores, token_masks, domain_ids)
+
+                            self.pertoken_scores = []
+                            self.token_masks = []
+                            self.domain_ids = []
+                else:
+                    dist.gather(excess_loss, dst=0)
+                    dist.gather(token_mask, dst=0)
+                    dist.gather(inputs['domain_ids'], dst=0)
+                
+                # runs on every process/gpu
+                if self.args.doremi_optimizer == 'doremiv1':
+                    # compute the rescaled loss, divide by domain weights
+                    train_domain_weights = self.read_weights().to(pertoken_loss.device)
+                    # if doing non-uniform sampling, normalize by inverse sampling weight
+                    train_domain_weights = train_domain_weights / self.sampling_weights.to(train_domain_weights.device)
+                    train_domain_weights = train_domain_weights / train_domain_weights.sum()
+                    
+                    # for lm objective
+                    # mbsz=1, num_procs=2
+                    # rank=0: domain_id=0
+                    # rank=1: domain_id=1
+                    # 
+                    # token_mask = torch.ones(1, 1023)
+                    # curr_domain_weights
+                    # rank=0: torch.ones(1, 1023)*αₜ[0]
+                    # rank=1: torch.ones(1, 1023)*αₜ[1]
+                    # normalizer
+                    # rank=0: 1023*αₜ[0]
+                    # rank=1: 1023*αₜ[1]
+                    # 
+                    # after `all_reduce` and scale by world size
+                    # normalizer
+                    # rank=0&1: 1023*(αₜ[0]+αₜ[1]) / 2
+                    # curr_domain_weights
+                    # rank=0: torch.ones(1, 1023)*αₜ[0] / (1023*(αₜ[0]+αₜ[1]) / 2) = 2*torch.ones(1, 1023)*(αₜ[0]/(αₜ[0]+αₜ[1])) / 1023 = 2*torch.ones(1, 1023)*αₜ[0] / 1023
+                    # rank=1: 2*torch.ones(1, 1023)*αₜ[1] / 1023
+                    # 
+
+                    # (mbsz, seq_len-1)
+                    curr_domain_weights = train_domain_weights[inputs['domain_ids']].unsqueeze(-1).expand_as(pertoken_loss).detach()
+                    curr_domain_weights = curr_domain_weights * token_mask
+
+                    # sum over (#procs,) `normalizer`
+                    normalizer = curr_domain_weights.sum()
+                    # gather normalizer across GPUs
+                    dist.all_reduce(normalizer, op=torch.distributed.ReduceOp.SUM) 
+                    # scale by world size because DDP averages gradients
+                    normalizer = normalizer / self.args.world_size
+
+                    ## wpq: remove since `token_mask` not used any more.
+                    # token_mask = token_mask.detach().type(pertoken_loss.dtype)
+                    curr_domain_weights = curr_domain_weights / normalizer # sum to 1.
+                    ## wpq: clip `curr_domain_weights` to [0, 1]
+                    curr_domain_weights = torch.clip(curr_domain_weights, min=1e-8, max=1-1e-8)
+                    ## wpq: `loss` only involves `pertoken_loss` and not `excess_loss` 
+                    # since `reference_per_token_loss` does not depend on model parameters.
+                    loss = (pertoken_loss * curr_domain_weights.detach()).sum()
+                else:
+                    raise ValueError(f"doremi_optimizer {self.args.doremi_optimizer} is not supported")
+            else:  
+                # non-DDP code.
                 with torch.no_grad():
-                    gathered_excess_losses = [
-                            torch.zeros_like(excess_loss) for _ in range(self.args.world_size)
-                            ]
-                    dist.gather(excess_loss, gathered_excess_losses, dst=0)
-                    gathered_excess_losses = torch.cat(gathered_excess_losses, dim=0)
-
-                    gathered_token_mask = [
-                            torch.zeros_like(token_mask) for _ in range(self.args.world_size)
-                            ]
-                    dist.gather(token_mask, gathered_token_mask, dst=0)
-                    gathered_token_mask = torch.cat(gathered_token_mask, dim=0)
-
-                    gathered_domain_id = [
-                            torch.zeros_like(inputs['domain_ids']) for _ in range(self.args.world_size)
-                            ]
-                    dist.gather(inputs['domain_ids'], gathered_domain_id, dst=0)
-                    gathered_domain_id = torch.cat(gathered_domain_id, dim=0)
-
-                    self.pertoken_scores.append(gathered_excess_losses.detach())
-                    self.token_masks.append(gathered_token_mask.detach())
-                    self.domain_ids.append(gathered_domain_id.detach())
+                    self.pertoken_scores.append(excess_loss.detach())
+                    self.token_masks.append(token_mask.detach())
+                    self.domain_ids.append(inputs['domain_ids'].detach())
 
                     if len(self.pertoken_scores) == self.args.gradient_accumulation_steps:
                         pertoken_scores = torch.cat(self.pertoken_scores, dim=0)
@@ -355,32 +449,38 @@ class DoReMiTrainer(Trainer):
                         self.pertoken_scores = []
                         self.token_masks = []
                         self.domain_ids = []
-            else:
-                dist.gather(excess_loss, dst=0)
-                dist.gather(token_mask, dst=0)
-                dist.gather(inputs['domain_ids'], dst=0)
 
-            if self.args.doremi_optimizer == 'doremiv1':
-                # compute the rescaled loss, divide by domain weights
-                train_domain_weights = self.read_weights().to(pertoken_loss.device)
-                # if doing non-uniform sampling, normalize by inverse sampling weight
-                train_domain_weights = train_domain_weights / self.sampling_weights.to(train_domain_weights.device)
-                train_domain_weights = train_domain_weights / train_domain_weights.sum()
-                
-                curr_domain_weights = train_domain_weights[inputs['domain_ids']].unsqueeze(-1).expand_as(pertoken_loss).detach()
-                curr_domain_weights = curr_domain_weights * token_mask
+                if self.args.doremi_optimizer == 'doremiv1':
+                    ## wpq: the implementation not the same as specified in the paper.
+                    # specifically, the normalizer is wrong, should be #tokens in a domain!
+                    #
+                    # assume bsz=3, token_mask = torch.ones(bsz, 1023)
+                    # domain_ids = [2,2,0]
+                    # curr_domain_weights = [αₜ[2], αₜ[2], αₜ[0]] where αₜ normalized to 1.
+                    # curr_domain_weights = [[αₜ[2]]*1023, [αₜ[2]]*1023, [αₜ[0]]*1023] \in (3, 1023)
+                    # normalizer = αₜ[2]*1023 + αₜ[2]*1023 + αₜ[0]*1023
+                    # curr_domain_weights = [[αₜ[2] / ( αₜ[2]*1023 + αₜ[2]*1023 + αₜ[0]*1023 )]*1023, ...]
+                    #
 
-                normalizer = curr_domain_weights.sum()
-                # gather normalizer across GPUs
-                dist.all_reduce(normalizer, op=torch.distributed.ReduceOp.SUM) 
-                # scale by world size because DDP averages gradients
-                normalizer = normalizer / self.args.world_size
+                    # compute the rescaled loss, divide by domain weights
+                    train_domain_weights = self.read_weights().to(pertoken_loss.device)
+                    # if doing non-uniform sampling, normalize by inverse sampling weight
+                    train_domain_weights = train_domain_weights / self.sampling_weights.to(train_domain_weights.device)
+                    train_domain_weights = train_domain_weights / train_domain_weights.sum()
+                    
+                    curr_domain_weights = train_domain_weights[inputs['domain_ids']].unsqueeze(-1).expand_as(pertoken_loss).detach()
+                    curr_domain_weights = curr_domain_weights * token_mask
 
-                token_mask = token_mask.detach().type(pertoken_loss.dtype)
-                curr_domain_weights = curr_domain_weights / normalizer
-                loss = (pertoken_loss * curr_domain_weights.detach()).sum()
-            else:
-                raise ValueError(f"doremi_optimizer {self.args.doremi_optimizer} is not supported")
+                    normalizer = curr_domain_weights.sum()
+
+                    ## wpq: remove since `token_mask` not used any more.
+                    # token_mask = token_mask.detach().type(pertoken_loss.dtype)
+                    curr_domain_weights = curr_domain_weights / normalizer # sum to 1.
+                    ## wpq: clip `curr_domain_weights` to [0, 1]
+                    curr_domain_weights = torch.clip(curr_domain_weights, min=1e-8, max=1-1e-8)
+                    loss = (pertoken_loss * curr_domain_weights.detach()).sum()
+                else:
+                    raise ValueError(f"doremi_optimizer {self.args.doremi_optimizer} is not supported")
         else:
             # wpq: this is the original code.
             with self.compute_loss_context_manager():
