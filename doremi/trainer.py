@@ -264,6 +264,7 @@ class DoReMiTrainer(Trainer):
             for domain_id in range(len(train_domain_weights)):
                 domain_mask = (domain_ids == domain_id)
                 perdomain_scores_mask = scores_mask[domain_mask]
+                # batch size at least one sample from domain `domain_id`.
                 if domain_mask.sum() > 0:
                     curr_domain_scores = torch.clip(scores[domain_mask][perdomain_scores_mask], min=0).mean()
                 else:
@@ -429,6 +430,37 @@ class DoReMiTrainer(Trainer):
                     ## wpq: `loss` only involves `pertoken_loss` and not `excess_loss` 
                     # since `reference_per_token_loss` does not depend on model parameters.
                     loss = (pertoken_loss * curr_domain_weights.detach()).sum()
+                elif self.args.doremi_optimizer == 'doremiv2':
+                    # compute the rescaled loss, divide by domain weights
+                    train_domain_weights = self.read_weights().to(pertoken_loss.device)
+                    # if doing non-uniform sampling, normalize by inverse sampling weight
+                    train_domain_weights = train_domain_weights / self.sampling_weights.to(train_domain_weights.device)
+                    train_domain_weights = train_domain_weights / train_domain_weights.sum()
+
+                    # (#domains,) total number of tokens amongst samples from each domain
+                    perdomain_num_tokens = []
+                    for domain_id in range(len(train_domain_weights)):
+                        domain_mask = (inputs['domain_ids'] == domain_id)
+                        if domain_mask.sum() > 0:
+                            num_tokens = token_mask[domain_mask].sum()
+                        else:
+                            num_tokens = torch.tensor(0., device=token_mask.device)
+                        perdomain_num_tokens.append(num_tokens)
+                    perdomain_num_tokens = torch.stack(perdomain_num_tokens)
+
+                    ## wpq: sync between procs `perdomain_num_tokens` since different procs 
+                    # might process micro-batch samples from the same domain.
+                    dist.all_reduce(perdomain_num_tokens, op=torch.distributed.ReduceOp.SUM)
+                    # scale by world size because DDP averages gradients
+                    perdomain_num_tokens = perdomain_num_tokens / self.args.world_size
+
+                    # avoid division by zero
+                    perdomain_num_tokens[torch.where(perdomain_num_tokens==0)] = 1.
+                    # (#domains,) equivalent to αᵢ / Σ_{x\in D_i} |x|
+                    perdomain_coeff = train_domain_weights/perdomain_num_tokens
+                    # (bsz, seq_len-1)
+                    coeff = perdomain_coeff[inputs['domain_ids']].unsqueeze(-1) * token_mask
+                    loss = (pertoken_loss * coeff.detach()).sum()
                 else:
                     raise ValueError(f"doremi_optimizer {self.args.doremi_optimizer} is not supported")
             else:  
@@ -479,6 +511,31 @@ class DoReMiTrainer(Trainer):
                     ## wpq: clip `curr_domain_weights` to [0, 1]
                     curr_domain_weights = torch.clip(curr_domain_weights, min=1e-8, max=1-1e-8)
                     loss = (pertoken_loss * curr_domain_weights.detach()).sum()
+                elif self.args.doremi_optimizer == 'doremiv2':
+                    # compute the rescaled loss, divide by domain weights
+                    train_domain_weights = self.read_weights().to(pertoken_loss.device)
+                    # if doing non-uniform sampling, normalize by inverse sampling weight
+                    train_domain_weights = train_domain_weights / self.sampling_weights.to(train_domain_weights.device)
+                    train_domain_weights = train_domain_weights / train_domain_weights.sum()
+
+                    # (#domains,) total number of tokens amongst samples from each domain
+                    perdomain_num_tokens = []
+                    for domain_id in range(len(train_domain_weights)):
+                        domain_mask = (inputs['domain_ids'] == domain_id)
+                        if domain_mask.sum() > 0:
+                            num_tokens = token_mask[domain_mask].sum()
+                        else:
+                            num_tokens = torch.tensor(0., device=token_mask.device)
+                        perdomain_num_tokens.append(num_tokens)
+                    perdomain_num_tokens = torch.stack(perdomain_num_tokens)
+
+                    # avoid division by zero
+                    perdomain_num_tokens[torch.where(perdomain_num_tokens==0)] = 1.
+                    # (#domains,) equivalent to αᵢ / Σ_{x\in D_i} |x|
+                    perdomain_coeff = train_domain_weights/perdomain_num_tokens
+                    # (bsz, seq_len-1)
+                    coeff = perdomain_coeff[inputs['domain_ids']].unsqueeze(-1) * token_mask
+                    loss = (pertoken_loss * coeff.detach()).sum()
                 else:
                     raise ValueError(f"doremi_optimizer {self.args.doremi_optimizer} is not supported")
         else:
