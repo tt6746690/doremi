@@ -424,7 +424,7 @@ class DoReMiTrainer(Trainer):
 
                     ## wpq: remove since `token_mask` not used any more.
                     # token_mask = token_mask.detach().type(pertoken_loss.dtype)
-                    curr_domain_weights = curr_domain_weights / normalizer # sum to 1.
+                    curr_domain_weights = curr_domain_weights / normalizer # sum to 1
                     ## wpq: clip `curr_domain_weights` to [0, 1]
                     curr_domain_weights = torch.clip(curr_domain_weights, min=1e-8, max=1-1e-8)
                     ## wpq: `loss` only involves `pertoken_loss` and not `excess_loss` 

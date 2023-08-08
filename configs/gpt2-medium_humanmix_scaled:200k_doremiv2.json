@@ -1,0 +1,14 @@
+{
+  "train_domain_weights": {
+    "cot": NaN,
+    "dolly": NaN,
+    "flan_v2": NaN,
+    "oasst1": NaN
+  },
+  "eval_domain_weights": {
+    "cot": NaN,
+    "dolly": NaN,
+    "flan_v2": NaN,
+    "oasst1": NaN
+  }
+}
