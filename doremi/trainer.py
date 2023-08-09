@@ -330,6 +330,15 @@ class DoReMiTrainer(Trainer):
         Return:
             `torch.Tensor`: The tensor with training loss on this batch.
         """
+
+        # if self.is_local_process_zero():
+        #     for param_name, param in model.named_parameters():
+        #         if 'gpt_neox.layers.0._fsdp_wrapped_module._flat_param' in param_name:
+        #             print(param_name, param.sum(), param.max())
+        #         if 'reference_model.gpt_neox.layers.0._fsdp_wrapped_module._flat_param' in param_name:
+        #             print(param_name, param.sum(), param.max())
+
+
         model.train()
         inputs = self._prepare_inputs(inputs)
 

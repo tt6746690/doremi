@@ -246,6 +246,8 @@ def main():
                 model_cls = doremi_models.GPT2LMHeadModelDoReMi
             elif model_args.model_type in {'pythia'}:
                 model_cls = doremi_models.GPTNeoXForCausalLMDoReMi
+            elif model_args.model_type in {'llama'}:
+                model_cls = doremi_models.LlamaForCausalLMDoReMi
             else:
                 model_cls = AutoModelForCausalLM
             model = model_cls.from_pretrained(
@@ -263,6 +265,8 @@ def main():
             model = doremi_models.GPT2LMHeadModelDoReMi(config)
         elif model_args.model_type in {'pythia'}:
             model = doremi_models.GPTNeoXForCausalLMDoReMi(config)
+        elif model_args.model_type in {'llama'}:
+            model = doremi_models.LlamaForCausalLMDoReMi(config)
         else:
             model = AutoModelForCausalLM.from_config(config)
 
@@ -331,6 +335,8 @@ def main():
                 model_cls = doremi_models.GPT2LMHeadModelDoReMi
             elif model_args.model_type in {'pythia'}:
                 model_cls = doremi_models.GPTNeoXForCausalLMDoReMi
+            elif model_args.model_type in {'llama'}:
+                model_cls = doremi_models.LlamaForCausalLMDoReMi
             else:
                 model_cls = AutoModelForCausalLM
             reference_model = model_cls.from_pretrained(
@@ -342,8 +348,10 @@ def main():
                 use_auth_token=True if model_args.use_auth_token else None,
                 torch_dtype=torch_dtype,
             )
-        for param in reference_model.parameters():
-            param.requires_grad = False
+        # fsdp does not work with mixed `requires_grad` model
+        if not training_args.fsdp:
+            for param in reference_model.parameters():
+                param.requires_grad = False
         reference_model.eval()
         model.reference_model = reference_model
         # initialize α0 as α_ref

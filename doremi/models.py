@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 from dataclasses import dataclass
 import torch
 from torch import nn
@@ -146,7 +146,7 @@ if has_flash_attn:
                             inference_params=inference_params,
                             last_token_only=last_token_only,
                         )
-                        reference_pertoken_loss = reference_outputs['pertoken_loss']
+                        reference_pertoken_loss = reference_outputs['pertoken_loss'].detach()
 
                 if not return_dict:
                     output = (lm_logits, None, None, None, domain_ids, pertoken_loss, reference_pertoken_loss, token_mask) 
@@ -195,8 +195,143 @@ if has_flash_attn:
 
 
 if not has_flash_attn:
-    from transformers import GPT2LMHeadModel, GPTNeoXForCausalLM
+    from transformers import GPT2LMHeadModel, GPTNeoXForCausalLM, LlamaForCausalLM
     from torch.nn import CrossEntropyLoss
+
+
+    # https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L732
+    class LlamaForCausalLMDoReMi(LlamaForCausalLM):
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.ignore_index = -100
+            self.loss_fct = CrossEntropyLoss(reduction='mean', ignore_index=self.ignore_index)
+            self.pertoken_loss_fct = CrossEntropyLoss(reduction='none', ignore_index=self.ignore_index)
+            self.reference_model = None
+
+        def forward(
+            self,
+            input_ids: torch.LongTensor = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[List[torch.FloatTensor]] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            labels: Optional[torch.LongTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+            ## wpq: doremi specific
+            domain_ids: Optional[torch.LongTensor] = None,
+            return_pertoken_losses: Optional[bool] = False,
+        ) -> Union[Tuple, CausalLMOutputWithDomainIDs]:
+
+            return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+
+            if not return_pertoken_losses:
+
+                lm_logits = super().forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    labels=None,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=True,
+                ).logits
+
+                loss = None
+                if labels is not None:
+                    # move labels to correct device to enable model parallelism
+                    labels = labels.to(lm_logits.device)
+                    # Shift so that tokens < n predict n
+                    shift_logits = lm_logits[:, :-1, :].contiguous()
+                    shift_labels = labels[:, 1:].contiguous()
+                    # Flatten the tokens
+                    loss = self.loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+                if not return_dict:
+                    output = (lm_logits, None, None, None, domain_ids, None, None, None) 
+                    return ((loss,) + output) if loss is not None else output
+
+                return CausalLMOutputWithDomainIDs(
+                    loss=loss,
+                    logits=lm_logits,
+                    past_key_values=None,
+                    hidden_states=None,
+                    attentions=None,
+                    domain_ids=domain_ids)
+            else:
+                
+                lm_logits = super().forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    labels=None,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=True,
+                ).logits
+
+                loss = None
+                pertoken_loss = None
+                reference_pertoken_loss = None
+                if labels is not None:
+                    # move labels to correct device to enable model parallelism
+                    labels = labels.to(lm_logits.device)
+                    # Shift so that tokens < n predict n
+                    shift_logits = lm_logits[:, :-1, :].contiguous()
+                    shift_labels = labels[:, 1:].contiguous()
+                    # Flatten the tokens
+                    pertoken_loss = self.pertoken_loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                    pertoken_loss = pertoken_loss.view(shift_labels.size(0), shift_labels.size(1))
+                    token_mask = shift_labels.ne(self.ignore_index).float()
+
+                    loss = pertoken_loss.sum() / token_mask.sum()
+
+                    # run reference model forward to get pertoken_loss
+                    if self.reference_model is not None:
+                        with torch.no_grad():
+                            self.reference_model.eval()
+                            reference_outputs = self.reference_model(
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
+                                position_ids=position_ids,
+                                past_key_values=past_key_values,
+                                inputs_embeds=inputs_embeds,
+                                labels=labels,
+                                use_cache=use_cache,
+                                output_attentions=output_attentions,
+                                output_hidden_states=output_hidden_states,
+                                return_dict=True,
+                                domain_ids=domain_ids,
+                                return_pertoken_losses=True,
+                            )
+                            reference_pertoken_loss = reference_outputs['pertoken_loss'].detach()
+
+                if not return_dict:
+                    output = (lm_logits, None, None, None, domain_ids, pertoken_loss, reference_pertoken_loss, token_mask) 
+                    return ((loss,) + output) if loss is not None else output
+
+                return CausalLMOutputWithDomainIDs(
+                    loss=loss,
+                    logits=lm_logits,
+                    past_key_values=None,
+                    hidden_states=None,
+                    attentions=None,
+                    domain_ids=domain_ids,
+                    pertoken_loss=pertoken_loss,
+                    reference_pertoken_loss=reference_pertoken_loss,
+                    token_mask=token_mask)
+
+
 
     # https://github.com/huggingface/transformers/blob/v4.31.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L691
     class GPTNeoXForCausalLMDoReMi(GPTNeoXForCausalLM):
@@ -298,23 +433,24 @@ if not has_flash_attn:
 
                     # run reference model forward to get pertoken_loss
                     if self.reference_model is not None:
-                        self.reference_model.eval()
-                        reference_outputs = self.reference_model(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            position_ids=position_ids,
-                            head_mask=head_mask,
-                            inputs_embeds=inputs_embeds,
-                            past_key_values=past_key_values,
-                            labels=labels,
-                            use_cache=use_cache,
-                            output_attentions=output_attentions,
-                            output_hidden_states=output_hidden_states,
-                            return_dict=True,
-                            domain_ids=domain_ids,
-                            return_pertoken_losses=True,
-                        )
-                        reference_pertoken_loss = reference_outputs['pertoken_loss']
+                        with torch.no_grad():
+                            self.reference_model.eval()
+                            reference_outputs = self.reference_model(
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
+                                position_ids=position_ids,
+                                head_mask=head_mask,
+                                inputs_embeds=inputs_embeds,
+                                past_key_values=past_key_values,
+                                labels=labels,
+                                use_cache=use_cache,
+                                output_attentions=output_attentions,
+                                output_hidden_states=output_hidden_states,
+                                return_dict=True,
+                                domain_ids=domain_ids,
+                                return_pertoken_losses=True,
+                            )
+                            reference_pertoken_loss = reference_outputs['pertoken_loss'].detach()
 
                 if not return_dict:
                     output = (lm_logits, None, None, None, domain_ids, pertoken_loss, reference_pertoken_loss, token_mask) 
@@ -433,28 +569,29 @@ if not has_flash_attn:
 
                     # run reference model forward to get pertoken_loss
                     if self.reference_model is not None:
-                        self.reference_model.eval()
-                        reference_outputs = self.reference_model(
-                            input_ids=input_ids,
-                            past_key_values=past_key_values,
-                            attention_mask=attention_mask,
-                            token_type_ids=token_type_ids,
-                            position_ids=position_ids,
-                            head_mask=head_mask,
-                            inputs_embeds=inputs_embeds,
-                            encoder_hidden_states=encoder_hidden_states,
-                            encoder_attention_mask=encoder_attention_mask,
-                            labels=labels,
-                            use_cache=use_cache,
-                            output_attentions=output_attentions,
-                            output_hidden_states=output_hidden_states,
-                            return_dict=return_dict,
-                            domain_ids=domain_ids,
-                            return_pertoken_losses=True,
-                            # inference_params=inference_params,
-                            # last_token_only=last_token_only,
-                        )
-                        reference_pertoken_loss = reference_outputs['pertoken_loss']
+                        with torch.no_grad():
+                            self.reference_model.eval()
+                            reference_outputs = self.reference_model(
+                                input_ids=input_ids,
+                                past_key_values=past_key_values,
+                                attention_mask=attention_mask,
+                                token_type_ids=token_type_ids,
+                                position_ids=position_ids,
+                                head_mask=head_mask,
+                                inputs_embeds=inputs_embeds,
+                                encoder_hidden_states=encoder_hidden_states,
+                                encoder_attention_mask=encoder_attention_mask,
+                                labels=labels,
+                                use_cache=use_cache,
+                                output_attentions=output_attentions,
+                                output_hidden_states=output_hidden_states,
+                                return_dict=return_dict,
+                                domain_ids=domain_ids,
+                                return_pertoken_losses=True,
+                                # inference_params=inference_params,
+                                # last_token_only=last_token_only,
+                            )
+                            reference_pertoken_loss = reference_outputs['pertoken_loss'].detach()
 
                 if not return_dict:
                     output = (lm_logits, None, None, None, domain_ids, pertoken_loss, reference_pertoken_loss, token_mask) 
