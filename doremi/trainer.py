@@ -298,14 +298,15 @@ class DoReMiTrainer(Trainer):
             raise ValueError(f"DoReMi optimizer {self.args.doremi_optimizer} not supported")
 
         if self.is_local_process_zero():
-            wandb_log_dict = {}
-            for domain_idx in range(len(new_train_domain_weights)):
-                domain_name = self.domain_list[domain_idx]
-                wandb_log_dict[f'avg_domain_weights/{domain_name}'] = self.model.avg_domain_weights[domain_idx].item()
-                wandb_log_dict[f'train_domain_weights/{domain_name}'] = self.model.train_domain_weights[domain_idx].item()
-                wandb_log_dict[f'perdomain_scores/{domain_name}'] = self.model.perdomain_scores[domain_idx].item()
-            wandb_log_dict[f'max_domain_id'] = domain_ids.max().item()
-            wandb.log(wandb_log_dict, commit=False)
+            if 'wandb' in self.args.report_to:
+                wandb_log_dict = {}
+                for domain_idx in range(len(new_train_domain_weights)):
+                    domain_name = self.domain_list[domain_idx]
+                    wandb_log_dict[f'avg_domain_weights/{domain_name}'] = self.model.avg_domain_weights[domain_idx].item()
+                    wandb_log_dict[f'train_domain_weights/{domain_name}'] = self.model.train_domain_weights[domain_idx].item()
+                    wandb_log_dict[f'perdomain_scores/{domain_name}'] = self.model.perdomain_scores[domain_idx].item()
+                wandb_log_dict[f'max_domain_id'] = domain_ids.max().item()
+                wandb.log(wandb_log_dict, commit=False)
 
     # wpq:
     # transformers v4.27.2: https://github.com/huggingface/transformers/blob/68287689f2f0d8b7063c400230b3766987abf18d/src/transformers/trainer.py#L2619
