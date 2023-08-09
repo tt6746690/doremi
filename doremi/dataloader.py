@@ -272,8 +272,9 @@ def get_perdomain_datasets(
         shard_reversal=False,
         tokenizer=None,
         training_args=None,
+        data_args=None,
     ):
-    '''
+    ''' 
     Returns a dictionary from domain name to IterableDataset.
     '''
     domain_name_to_skip_num = determine_skip_per_domain(num_skip_examples, seed, domain_weights, domain_names)
@@ -306,13 +307,13 @@ def get_perdomain_datasets(
                 encode_function = partial(
                     encode_with_prompt_completion_format,
                     tokenizer=tokenizer,
-                    max_seq_length=1024,
+                    max_seq_length=data_args.max_token_length,
                 )
             elif "messages" in raw_datasets["train"].column_names:
                 encode_function = partial(
                     encode_with_messages_format,
                     tokenizer=tokenizer,
-                    max_seq_length=1024,
+                    max_seq_length=data_args.max_token_length,
                 )
             else:
                 raise ValueError("You need to have either 'prompt'&'completion' or 'messages' in your column names.")
@@ -375,6 +376,7 @@ def get_preprocessed_mixed_dataset(
         num_skip_examples=0,
         shard_reversal=False,
         training_args=None,
+        data_args=None,
     ):
     '''preprocessed_dir: has the following format
                first level: domain directories
@@ -436,6 +438,7 @@ def get_preprocessed_mixed_dataset(
                 shard_reversal=shard_reversal,
                 tokenizer=tokenizer,
                 training_args=training_args,
+                data_args=data_args,
             )
         except Exception:
             raise ValueError(f"dataset_name {dataset_name} not implemented.")
@@ -486,7 +489,7 @@ def get_preprocessed_mixed_dataset(
 
 
 
-def get_data_collator(tokenizer, return_tensors='pt', do_padding=False):
+def get_data_collator(tokenizer, return_tensors='pt', do_padding=False, max_seq_length=1024):
     
     # wpq: for padding batches with `labels`
     if do_padding:
@@ -498,7 +501,7 @@ def get_data_collator(tokenizer, return_tensors='pt', do_padding=False):
             # specify `pad_to_multiple_of` instead of `padding='max_length'`, somehow latter fails.
             # # padding='max_length',
             # # max_length=tokenizer.model_max_length,
-            pad_to_multiple_of=tokenizer.model_max_length,
+            pad_to_multiple_of=max_seq_length,
         )
 
     def data_collator(features):

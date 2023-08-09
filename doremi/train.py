@@ -154,6 +154,7 @@ def main():
         "cache_dir": model_args.cache_dir,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
+        "use_cache": True if not training_args.gradient_checkpointing else False,
     }
     if model_args.config_name:
         config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
@@ -208,6 +209,8 @@ def main():
     # here specify `max_model_length` so that data collator can function properly.
     if model_args.model_type == 'gpt2':
         model_max_length = 1024
+    elif model_args.model_type in {'llama', 'pythia'}:
+        model_max_length = 2048
     else:
         model_max_length = None
     tokenizer_kwargs = {
@@ -228,6 +231,7 @@ def main():
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
 
+
     if model_args.model_name_or_path:
         torch_dtype = (
             model_args.torch_dtype
@@ -237,19 +241,15 @@ def main():
         if model_args.model_type in {'gpt_flash', 'gpt_neox_flash'}:
             model = doremi_models.GPTFlashAttnLMHeadModel.from_pretrained(
                 model_args.model_name_or_path, config=config)
-        elif model_args.model_type in ['gpt2']:
-            model = doremi_models.GPT2LMHeadModelDoReMi.from_pretrained(
-                model_args.model_name_or_path, 
-                config=config,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                torch_dtype=torch_dtype,
-            )
         else:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_args.model_name_or_path,
-                from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            if model_args.model_type in {'gpt2'}:
+                model_cls = doremi_models.GPT2LMHeadModelDoReMi
+            elif model_args.model_type in {'pythia'}:
+                model_cls = doremi_models.GPTNeoXForCausalLMDoReMi
+            else:
+                model_cls = AutoModelForCausalLM
+            model = model_cls.from_pretrained(
+                model_args.model_name_or_path, 
                 config=config,
                 cache_dir=model_args.cache_dir,
                 revision=model_args.model_revision,
@@ -261,11 +261,14 @@ def main():
             model = doremi_models.GPTFlashAttnLMHeadModel(config)
         elif model_args.model_type in {'gpt2'}:
             model = doremi_models.GPT2LMHeadModelDoReMi(config)
+        elif model_args.model_type in {'pythia'}:
+            model = doremi_models.GPTNeoXForCausalLMDoReMi(config)
         else:
             model = AutoModelForCausalLM.from_config(config)
 
         n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
         logger.info(f"Training new model from scratch - Total size={n_params/2**20:.2f}M params")
+
 
     with open(training_args.domain_config_path, 'r') as f:
         domain_config = json.load(f)
@@ -293,6 +296,7 @@ def main():
                 num_skip_examples=num_skip_examples,
                 shard_reversal=training_args.reweight_domains,
                 training_args=training_args,
+                data_args=data_args,
         )
 
     if training_args.do_eval:
@@ -307,7 +311,9 @@ def main():
                 tokenizer=tokenizer,
                 no_interleave=True,
                 training_args=training_args,
+                data_args=data_args,
         )
+
 
     if training_args.reweight_domains:
         torch_dtype = (
@@ -320,18 +326,13 @@ def main():
             reference_model = model_cls.from_pretrained(
                 training_args.reference_model_name_or_path,
                 config=config)
-        elif model_args.model_type in {'gpt2'}:
-            model_cls = doremi_models.GPT2LMHeadModelDoReMi
-            reference_model = model_cls.from_pretrained(
-                training_args.reference_model_name_or_path,
-                config=config,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                torch_dtype=torch_dtype,
-            )
         else:
-            model_cls = AutoModelForCausalLM
+            if model_args.model_type in {'gpt2'}:
+                model_cls = doremi_models.GPT2LMHeadModelDoReMi
+            elif model_args.model_type in {'pythia'}:
+                model_cls = doremi_models.GPTNeoXForCausalLMDoReMi
+            else:
+                model_cls = AutoModelForCausalLM
             reference_model = model_cls.from_pretrained(
                 training_args.reference_model_name_or_path,
                 from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -345,6 +346,7 @@ def main():
             param.requires_grad = False
         reference_model.eval()
         model.reference_model = reference_model
+        # initialize α0 as α_ref
         model.register_buffer('train_domain_weights', torch.tensor(
                 [train_domain_weights_dict[domain] for domain in domain_list]))
         model.register_buffer('avg_domain_weights', model.train_domain_weights.clone())
@@ -354,8 +356,6 @@ def main():
     else:
         reference_model = None
 
-    # wpq: `use_cache=True` is incompatible with gradient checkpointing
-    model.config.use_cache=False
 
     # turn off find unused parameters
     training_args.ddp_find_unused_parameters = False
@@ -375,7 +375,8 @@ def main():
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
-        data_collator=data_utils.get_data_collator(tokenizer, do_padding=data_args.do_padding),
+        data_collator=data_utils.get_data_collator(
+            tokenizer, do_padding=data_args.do_padding, max_seq_length=data_args.max_token_length),
     )
 
     # Training

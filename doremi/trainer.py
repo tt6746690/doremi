@@ -244,6 +244,7 @@ class DoReMiTrainer(Trainer):
         # return (loss, outputs) if return_outputs else loss
         #
         if return_outputs:
+            # wpq: this is never called in the current `trainer` script.
             return (loss, outputs)
         elif return_pertoken_losses:
             return (loss,
@@ -407,8 +408,8 @@ class DoReMiTrainer(Trainer):
                     # normalizer
                     # rank=0&1: 1023*(αₜ[0]+αₜ[1]) / 2
                     # curr_domain_weights
-                    # rank=0: torch.ones(1, 1023)*αₜ[0] / (1023*(αₜ[0]+αₜ[1]) / 2) = 2*torch.ones(1, 1023)*(αₜ[0]/(αₜ[0]+αₜ[1])) / 1023 = 2*torch.ones(1, 1023)*αₜ[0] / 1023
-                    # rank=1: 2*torch.ones(1, 1023)*αₜ[1] / 1023
+                    # rank=0: torch.ones(1, 1023)*αₜ[0] / (1023*(αₜ[0]+αₜ[1]) / 2) 
+                    # rank=1: torch.ones(1, 1023)*αₜ[1] / (1023*(αₜ[0]+αₜ[1]) / 2) 
                     # 
 
                     # (mbsz, seq_len-1)
