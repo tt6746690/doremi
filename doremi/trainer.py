@@ -297,7 +297,7 @@ class DoReMiTrainer(Trainer):
         else:
             raise ValueError(f"DoReMi optimizer {self.args.doremi_optimizer} not supported")
 
-        if self.is_local_process_zero():
+        if self.is_world_process_zero():
             if 'wandb' in self.args.report_to:
                 wandb_log_dict = {}
                 for domain_idx in range(len(new_train_domain_weights)):
@@ -353,7 +353,9 @@ class DoReMiTrainer(Trainer):
 
             ## https://github.com/huggingface/transformers/blob/v4.31.0/src/transformers/training_args.py#L1840
             if self.args.world_size > 1:  # DDP code.
-                if self.is_local_process_zero():
+                ## wpq: multi-node training, want just one node to run the following code.
+                # if self.is_local_process_zero():
+                if self.is_world_process_zero():
                     with torch.no_grad():
                         gathered_excess_losses = [
                                 torch.zeros_like(excess_loss) for _ in range(self.args.world_size)
