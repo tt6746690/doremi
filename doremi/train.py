@@ -83,6 +83,8 @@ require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/lang
 
 logger = logging.getLogger(__name__)
 
+
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -95,6 +97,9 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # training_args.fsdp_config['fsdp_sync_module_states'] = True
+    # training_args.fsdp_config['fsdp_state_dict_type'] = 'FULL_STATE_DICT' #'SHARDED_STATE_DICT'
 
     # Setup logging
     logging.basicConfig(
